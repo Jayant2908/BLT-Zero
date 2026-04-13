@@ -250,9 +250,8 @@ shotsInput.addEventListener('change', () => {
 });
 
 function getFilesForZip(){
-  // Use curated list if any, else fall back to raw input files
-  return selectedShots.length ? selectedShots.map(s => s.file)
-                              : Array.from(shotsInput.files || []);
+  // Always use curated preview state as source of truth
+  return selectedShots.map(s => s.file);
 }
 
 function clearPreviews(){
