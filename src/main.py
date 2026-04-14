@@ -77,18 +77,39 @@ def _sendgrid_status(env):
 # ----------------------------
 _RL_COUNTERS = {}
 _RL_SETS = {}
+_RL_TIMESTAMPS = {}
 
+def _cleanup_old_buckets(ttl_seconds: int = 86400):
+    """
+    Remove old rate-limit keys to prevent memory leaks.
+    Default TTL = 1 day.
+    """
+    now = datetime.now(timezone.utc).timestamp()
+    to_delete = []
+
+    for key, ts in _RL_TIMESTAMPS.items():
+        if now - ts > ttl_seconds:
+            to_delete.append(key)
+
+    for key in to_delete:
+        _RL_TIMESTAMPS.pop(key, None)
+        _RL_COUNTERS.pop(key, None)
+        _RL_SETS.pop(key, None)
 
 def _incr_counter(key: str) -> int:
+    now = datetime.now(timezone.utc).timestamp()
+    _RL_TIMESTAMPS[key] = now
     _RL_COUNTERS[key] = _RL_COUNTERS.get(key, 0) + 1
     return _RL_COUNTERS[key]
 
 
 def _get_set(key: str):
+    now = datetime.now(timezone.utc).timestamp()
     s = _RL_SETS.get(key)
     if s is None:
         s = set()
         _RL_SETS[key] = s
+    _RL_TIMESTAMPS[key] = now
     return s
 
 
@@ -104,6 +125,10 @@ def _check_rate_limits(env, ip: str, org_email: str, url_host: str):
         day_bucket_iso(now),
     )
 
+    # Cleanup old buckets
+    ttl = int(getattr(env, "RL_TTL_SECONDS", "86400"))
+    _cleanup_old_buckets(ttl)
+
     ip_min = int(getattr(env, "RL_IP_PER_MINUTE", "5"))
     ip_hr = int(getattr(env, "RL_IP_PER_HOUR", "50"))
     ip_day = int(getattr(env, "RL_IP_PER_DAY", "200"))
@@ -111,6 +136,7 @@ def _check_rate_limits(env, ip: str, org_email: str, url_host: str):
     emd_hr = int(getattr(env, "RL_EMAIL_DOMAIN_PER_HOUR", "20"))
     de_iphr = int(getattr(env, "RL_DISTINCT_EMAILS_PER_IP_PER_HOUR", "10"))
     glob_min = int(getattr(env, "RL_GLOBAL_PER_MINUTE", "30"))
+    url_host_limit = int(getattr(env, "RL_URL_PER_IP_PER_HOUR", "40"))
 
     org_email_lc = org_email.lower()
     email_domain = org_email_lc.split("@")[-1] if "@" in org_email_lc else "invalid"
@@ -134,7 +160,7 @@ def _check_rate_limits(env, ip: str, org_email: str, url_host: str):
         return "too many different recipient emails from this IP (per hour)"
 
     c = _incr_counter(f"urlhost:{ip}:{url_host}:h:{b_hr}")
-    if c > 40:
+    if c > url_host_limit:
         return "too many submissions to the same host from this IP (per hour)"
 
     return None
@@ -206,8 +232,19 @@ class Default(WorkerEntrypoint):
                     {"error": "missing encrypted zip payload or password"}, status=400
                 )
 
+            # Pre-check base64 size to prevent memory abuse
+            max_b64_size = int(getattr(env, "ZIP_MAX_B64_SIZE", "7000000"))
+            if len(zip_b64) > max_b64_size:
+                return Response.json(
+                    {"error": "base64 payload too large"}, status=400
+                )
+
             try:
-                url_host = urlparse(url_val).netloc.lower()
+                parsed = urlparse(url_val)
+                if parsed.scheme not in ("http", "https") or not parsed.hostname:
+                    url_host = "invalid"
+                else:
+                    url_host = parsed.hostname.lower()
             except Exception:
                 url_host = "invalid"
 
