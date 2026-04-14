@@ -78,6 +78,7 @@ def _sendgrid_status(env):
 _RL_COUNTERS = {}
 _RL_SETS = {}
 _RL_TIMESTAMPS = {}
+_RL_LAST_CLEANUP_TS = 0.0
 
 def _cleanup_old_buckets(ttl_seconds: int = 86400):
     """
@@ -119,15 +120,18 @@ def _limit_exceeded(current: int, limit: int) -> bool:
 
 def _check_rate_limits(env, ip: str, org_email: str, url_host: str):
     now = datetime.now(timezone.utc)
+    now_ts = now.timestamp()
+    global _RL_LAST_CLEANUP_TS
     b_min, b_hr, b_day = (
         minute_bucket_iso(now),
         hour_bucket_iso(now),
         day_bucket_iso(now),
     )
 
-    # Cleanup old buckets
     ttl = int(getattr(env, "RL_TTL_SECONDS", "86400"))
-    _cleanup_old_buckets(ttl)
+    if now_ts - _RL_LAST_CLEANUP_TS >= 60:
+        _cleanup_old_buckets(ttl)
+        _RL_LAST_CLEANUP_TS = now_ts
 
     ip_min = int(getattr(env, "RL_IP_PER_MINUTE", "5"))
     ip_hr = int(getattr(env, "RL_IP_PER_HOUR", "50"))
@@ -230,6 +234,11 @@ class Default(WorkerEntrypoint):
             if not zip_b64 or not password:
                 return Response.json(
                     {"error": "missing encrypted zip payload or password"}, status=400
+                )
+
+            if not isinstance(zip_b64, str):
+                return Response.json(
+                    {"error": "zip_content_b64 must be a base64 string"}, status=400
                 )
 
             # Pre-check base64 size to prevent memory abuse
